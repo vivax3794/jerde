@@ -1,6 +1,7 @@
 import typing
 import types
 import abc
+import inspect
 from typing import Mapping, Sequence, TypeAlias, TypeVar
 
 _JSON_DATA: TypeAlias = str | int | None | Sequence["_JSON_DATA"] | Mapping[str, "_JSON_DATA"]
@@ -47,54 +48,32 @@ def _get_fields(cls: type) -> list[tuple[str, str, type]]:
     return fields
 
 
-def _deserialize_union(name: str, value: object, expected_type: object) -> object:
+def _deserialize_union(name: str, value: object, expected_type: object, module_scope: dict[str, object]) -> object:
     accepted_types: tuple[type, ...] = typing.get_args(expected_type)
 
-    if isinstance(value, list):
-        errors: list[str] = []
-        for possible in accepted_types:
-            if typing.get_origin(possible) == list:
-                exp_type: type = typing.get_args(possible)[0]
-                try:
-                    return [_deserialize_value(f"{name}.{index}", elem, exp_type) for index, elem in enumerate(value)]  # type: ignore
-                except TypeError as err:
-                    errors.append(f"'{str(possible)}': {err}")
-        
-        if errors:
-            error_padding = "\n".join(errors).replace("\n", "\n\t")
-            raise TypeError(f"{name!r} did not match '{expected_type}'\n\t{error_padding}")
-            
-    elif isinstance(value, dict):
-        errors: list[str] = []
-        for possible in accepted_types:
-            if typing.get_origin(possible) == dict:
-                exp_type: type = typing.get_args(possible)[1]
-                try:
-                    return {key: _deserialize_value(f"{name}.{key}", item, exp_type) for key, item in value.items()}  # type: ignore
-                except TypeError as err:
-                    errors.append(f"'{str(possible)}': {err}")
-            elif issubclass(possible, JsonModel):
-                try:
-                    return _deserialize_value(name, value, possible)
-                except (TypeError, ValueError, KeyError) as err:
-                    errors.append(f"'{possible}': {err}")
-        
-        if errors:
-            error_padding = "\n".join(errors).replace("\n", "\n\t")
-            raise TypeError(f"{name!r} did not match '{expected_type}'\n\t{error_padding}")
-
-    if type(value) not in accepted_types:
-        raise TypeError(f"Expected {name!r} to be one of '{expected_type}', but got {type(value)}")
+    errors: list[str] = []
+    for possible in accepted_types:
+        try:
+            return _deserialize_value(name, value, possible, module_scope)
+        except (TypeError, ValueError) as err:
+            errors.append(f"'{str(possible)}': {err}")
+    if errors:
+        error_padding = "\n".join(errors).replace("\n", "\n\t")
+        raise TypeError(f"{name!r} did not match '{expected_type}'\n\t{error_padding}")
 
     return value  # type: ignore
 
-def _deserialize_value(name: str, value: _JSON_DATA, expected_type: type) -> object:
+def _deserialize_value(name: str, value: _JSON_DATA, expected_type: type, module_scope: dict[str, object]) -> object:
+    if isinstance(expected_type, str):
+        expected_type = eval(expected_type, globals(), module_scope)
+        print(expected_type)
+
     if typing.get_origin(expected_type) == list:
         if not isinstance(value, list):
             raise TypeError(f"Expected {name!r} to be {expected_type}, but got: {type(value)}")
 
         list_members: type = typing.get_args(expected_type)[0]
-        return [_deserialize_value(f"{name}.{index}", elem, list_members) for index, elem in enumerate(value)]  # type: ignore
+        return [_deserialize_value(f"{name}.{index}", elem, list_members, module_scope) for index, elem in enumerate(value)]  # type: ignore
     
     if typing.get_origin(expected_type) == dict:
         if not isinstance(value, dict):
@@ -104,10 +83,10 @@ def _deserialize_value(name: str, value: _JSON_DATA, expected_type: type) -> obj
         if key_type != str:
             raise TypeError(f"Dict key type must be str, got {key_type}, in type hint for {name!r}")
         
-        return {key: _deserialize_value(f"{name}.{key}", item, value_type) for key, item in value.items()}
+        return {key: _deserialize_value(f"{name}.{key}", item, value_type, module_scope) for key, item in value.items()}
 
     if typing.get_origin(expected_type) in {typing.Union, types.UnionType}:
-        return _deserialize_union(name, value, expected_type)
+        return _deserialize_union(name, value, expected_type, module_scope)
 
     if issubclass(expected_type, JsonModel):
         return expected_type(value)
@@ -123,7 +102,7 @@ def _deserialize_value(name: str, value: _JSON_DATA, expected_type: type) -> obj
         if json_type is None:
             raise TypeError("Unable to determine converter base type from provided bases: {bases}")
         
-        return expected_type(_deserialize_value(name, value, json_type))  # type: ignore
+        return expected_type(_deserialize_value(name, value, json_type, module_scope))  # type: ignore
 
     if not isinstance(value, expected_type):
         raise TypeError(f"Expected {name!r} to be '{expected_type}', but got: {type(value)}")
@@ -139,6 +118,9 @@ def _serialize_value(value: object) -> _JSON_DATA:
     elif isinstance(value, list):      
         v: list[object] = value  
         return [_serialize_value(elem) for elem in v]
+    elif isinstance(value, dict):
+        v: dict[str, object] = value
+        return {key: _serialize_value(item) for key, item in v.items()}
     elif isinstance(value, (int, str)):
         return value        
     else:
@@ -191,12 +173,14 @@ class JsonModel:
         if len(unused_keys) != 0:
             raise ValueError(f"Unexpected keys: {unused_keys}")
 
+        module = inspect.getmodule(self.__class__)
+
         for name, json_key, expected_type in fields:
             if hasattr(self.__class__, name) and json_key not in data:
                 setattr(self, name, getattr(self.__class__, name))
                 continue
 
-            setattr(self, name, _deserialize_value(json_key, data.get(json_key), expected_type))
+            setattr(self, name, _deserialize_value(json_key, data.get(json_key), expected_type, module.__dict__))
 
     
     def to_json(self) -> _JSON_DATA:

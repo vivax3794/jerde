@@ -1,6 +1,6 @@
 [project]
 name = "jerde"
-version = "0.1.0"
+version = "0.1.2"
 description = "Json parsing for humans"
 authors = [
     {name = "vivax3794", email = "vivax3794@protonmail.com"},
@@ -11,6 +11,18 @@ dependencies = [
 requires-python = ">=3.10"
 readme = "README.md"
 license = {text = "MIT"}
+keywords = ["json", "parsing", "orm", "serde"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    ""
+]
+[project.urls]
+docs = "https://vivax3794.github.io/jerde/jerde/"
+source = "https://github.com/vivax3794/jerde"
+
 
 [project.optional-dependencies]
 [tool.pdm]
@@ -19,6 +31,10 @@ dev = [
     "pytest>=7.1.2",
     "pdoc3>=0.10.0",
 ]
+
+[tool.pdm.scripts]
+tests = "pytest"
+docs = "pydoc --html -O docs jerde"
 
 [build-system]
 requires = ["pdm-pep517>=1.0.0"]

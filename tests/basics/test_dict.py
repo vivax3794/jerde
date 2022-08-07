@@ -12,6 +12,11 @@ def test_deserialize() -> None:
 
     assert value.stuff == {"hello": 1, "world": 2}
 
+def test_serialize() -> None:
+    data = {"stuff": {"hello": 1, "world": 2}}
+
+    assert DictModel(data).to_json() == data
+
 def test_invalid_type() -> None:
     with pytest.raises(TypeError):
         DictModel({"stuff": "nice"})
