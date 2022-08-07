@@ -1,0 +1,31 @@
+[project]
+name = "jerde"
+version = "0.1.0"
+description = "Json parsing for humans"
+authors = [
+    {name = "vivax3794", email = "vivax3794@protonmail.com"},
+]
+dependencies = [
+    "typing-extensions>=4.3.0",
+]
+requires-python = ">=3.10"
+readme = "README.md"
+license = {text = "MIT"}
+
+[project.optional-dependencies]
+[tool.pdm]
+[tool.pdm.dev-dependencies]
+dev = [
+    "pytest>=7.1.2",
+    "pdoc3>=0.10.0",
+]
+
+[build-system]
+requires = ["pdm-pep517>=1.0.0"]
+build-backend = "pdm.pep517.api"
+
+[tool.pyright]
+typeCheckingMode = "strict"
+extraPaths = ["__pypackages__/3.10/lib"]
+ignore = ["__pypackages__/"]
+include = ["src"]
