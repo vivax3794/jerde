@@ -29,9 +29,10 @@
 <pre><code class="python">import typing
 import types
 import abc
-from typing import Mapping, Sequence, TypeAlias, TypeVar
+import inspect
+from typing import Any, Mapping, Sequence, TypeAlias, TypeVar, Optional
 
-_JSON_DATA: TypeAlias = str | int | None | Sequence[&#34;_JSON_DATA&#34;] | Mapping[str, &#34;_JSON_DATA&#34;]
+_JSON_DATA: TypeAlias = str | int | None | Sequence[object] | Mapping[str, object]
 T = TypeVar(&#34;T&#34;)
 
 
@@ -75,54 +76,40 @@ def _get_fields(cls: type) -&gt; list[tuple[str, str, type]]:
     return fields
 
 
-def _deserialize_union(name: str, value: object, expected_type: object) -&gt; object:
+def _deserialize_union(name: str, value: object, expected_type: object, module_scope: dict[str, object]) -&gt; Any:
     accepted_types: tuple[type, ...] = typing.get_args(expected_type)
 
-    if isinstance(value, list):
-        errors: list[str] = []
-        for possible in accepted_types:
-            if typing.get_origin(possible) == list:
-                exp_type: type = typing.get_args(possible)[0]
-                try:
-                    return [_deserialize_value(f&#34;{name}.{index}&#34;, elem, exp_type) for index, elem in enumerate(value)]  # type: ignore
-                except TypeError as err:
-                    errors.append(f&#34;&#39;{str(possible)}&#39;: {err}&#34;)
-        
-        if errors:
-            error_padding = &#34;\n&#34;.join(errors).replace(&#34;\n&#34;, &#34;\n\t&#34;)
-            raise TypeError(f&#34;{name!r} did not match &#39;{expected_type}&#39;\n\t{error_padding}&#34;)
-            
-    elif isinstance(value, dict):
-        errors: list[str] = []
-        for possible in accepted_types:
-            if typing.get_origin(possible) == dict:
-                exp_type: type = typing.get_args(possible)[1]
-                try:
-                    return {key: _deserialize_value(f&#34;{name}.{key}&#34;, item, exp_type) for key, item in value.items()}  # type: ignore
-                except TypeError as err:
-                    errors.append(f&#34;&#39;{str(possible)}&#39;: {err}&#34;)
-            elif issubclass(possible, JsonModel):
-                try:
-                    return _deserialize_value(name, value, possible)
-                except (TypeError, ValueError, KeyError) as err:
-                    errors.append(f&#34;&#39;{possible}&#39;: {err}&#34;)
-        
-        if errors:
-            error_padding = &#34;\n&#34;.join(errors).replace(&#34;\n&#34;, &#34;\n\t&#34;)
-            raise TypeError(f&#34;{name!r} did not match &#39;{expected_type}&#39;\n\t{error_padding}&#34;)
-
-    if type(value) not in accepted_types:
-        raise TypeError(f&#34;Expected {name!r} to be one of &#39;{expected_type}&#39;, but got {type(value)}&#34;)
+    errors: list[str] = []
+    for possible in accepted_types:
+        try:
+            return deserialize_value(name, value, possible, module_scope)
+        except (TypeError, ValueError) as err:
+            errors.append(f&#34;&#39;{str(possible)}&#39;: {err}&#34;)
+    if errors:
+        error_padding = &#34;\n&#34;.join(errors).replace(&#34;\n&#34;, &#34;\n\t&#34;)
+        raise TypeError(f&#34;{name!r} did not match &#39;{expected_type}&#39;\n\t{error_padding}&#34;)
 
     return value  # type: ignore
 
-def _deserialize_value(name: str, value: _JSON_DATA, expected_type: type) -&gt; object:
+def deserialize_value(name: str, value: _JSON_DATA, expected_type: object, module_scope: dict[str, object]) -&gt; Any:
+    &#34;&#34;&#34;
+    Deserialize any specific value, can be any supported hint including union!
+
+    `name` will be included in any error messages produced!
+
+    `module_scope` will be used to resolve forward referenced type hints, for example `dict[str, &#34;ModelA&#34;]`. this can usually just be `globals()`
+
+    &gt;&gt;&gt; deserialize_value(&#34;...&#34;, ..., ModelA | ModelB, globals())
+    &#34;&#34;&#34;
+    if isinstance(expected_type, str):
+        expected_type = eval(expected_type, globals(), module_scope)
+
     if typing.get_origin(expected_type) == list:
         if not isinstance(value, list):
             raise TypeError(f&#34;Expected {name!r} to be {expected_type}, but got: {type(value)}&#34;)
 
         list_members: type = typing.get_args(expected_type)[0]
-        return [_deserialize_value(f&#34;{name}.{index}&#34;, elem, list_members) for index, elem in enumerate(value)]  # type: ignore
+        return [deserialize_value(f&#34;{name}.{index}&#34;, elem, list_members, module_scope) for index, elem in enumerate(value)]  # type: ignore
     
     if typing.get_origin(expected_type) == dict:
         if not isinstance(value, dict):
@@ -132,12 +119,22 @@ def _deserialize_value(name: str, value: _JSON_DATA, expected_type: type) -&gt; 
         if key_type != str:
             raise TypeError(f&#34;Dict key type must be str, got {key_type}, in type hint for {name!r}&#34;)
         
-        return {key: _deserialize_value(f&#34;{name}.{key}&#34;, item, value_type) for key, item in value.items()}
+        return {key: deserialize_value(f&#34;{name}.{key}&#34;, item, value_type, module_scope) for key, item in value.items()}
+
+    if typing.get_origin(expected_type) == typing.Literal:
+        possible = typing.get_args(expected_type)
+        if value not in possible:
+            raise ValueError(f&#34;expected {name!r} to be one of {possible}, got {value!r}&#34;)
+        
+        return value
 
     if typing.get_origin(expected_type) in {typing.Union, types.UnionType}:
-        return _deserialize_union(name, value, expected_type)
+        return _deserialize_union(name, value, expected_type, module_scope)
 
     if issubclass(expected_type, JsonModel):
+        if isinstance(value, expected_type):
+            return value
+            
         return expected_type(value)
 
     if issubclass(expected_type, JsonConverterModel):
@@ -151,7 +148,7 @@ def _deserialize_value(name: str, value: _JSON_DATA, expected_type: type) -&gt; 
         if json_type is None:
             raise TypeError(&#34;Unable to determine converter base type from provided bases: {bases}&#34;)
         
-        return expected_type(_deserialize_value(name, value, json_type))  # type: ignore
+        return expected_type(deserialize_value(name, value, json_type, module_scope))  # type: ignore
 
     if not isinstance(value, expected_type):
         raise TypeError(f&#34;Expected {name!r} to be &#39;{expected_type}&#39;, but got: {type(value)}&#34;)
@@ -167,6 +164,9 @@ def _serialize_value(value: object) -&gt; _JSON_DATA:
     elif isinstance(value, list):      
         v: list[object] = value  
         return [_serialize_value(elem) for elem in v]
+    elif isinstance(value, dict):
+        v: dict[str, object] = value
+        return {key: _serialize_value(item) for key, item in v.items()}
     elif isinstance(value, (int, str)):
         return value        
     else:
@@ -185,6 +185,12 @@ class JsonModel:
     10
     &gt;&gt;&gt; SimpleExample({&#34;stuff&#34;: &#34;wrong&#34;})
     TypeError: ...
+
+    You can also use keyword arguments to specify values in a nicer format.
+    &gt;&gt;&gt; class SimpleExample(JsonModel):
+    ...     stuff: int
+    &gt;&gt;&gt; SimpleExample(stuff = 10).stuff
+    10
 
     It also supports unions (both `typing.Union` and 3.10 `|` syntax).
     &gt;&gt;&gt; class UnionExample(JsonModel):
@@ -208,23 +214,23 @@ class JsonModel:
     10
     &#34;&#34;&#34;
 
-    def __init__(self, data: _JSON_DATA):
+    def __init__(self, data: Optional[_JSON_DATA] = None, **kwargs: object):
+        if data is None:
+            data = kwargs
+
         if not isinstance(data, dict):
             raise TypeError(&#34;Expected dict&#34;)
-        
+
         # error check data
         fields = _get_fields(self.__class__)
-
-        unused_keys = data.keys() - {json_key for _, json_key, _ in fields}
-        if len(unused_keys) != 0:
-            raise ValueError(f&#34;Unexpected keys: {unused_keys}&#34;)
+        module = inspect.getmodule(self.__class__)
 
         for name, json_key, expected_type in fields:
             if hasattr(self.__class__, name) and json_key not in data:
                 setattr(self, name, getattr(self.__class__, name))
                 continue
 
-            setattr(self, name, _deserialize_value(json_key, data.get(json_key), expected_type))
+            setattr(self, name, deserialize_value(json_key, data.get(json_key), expected_type, module.__dict__))
 
     
     def to_json(self) -&gt; _JSON_DATA:
@@ -282,6 +288,87 @@ class JsonConverterModel(typing.Generic[T], abc.ABC):
 <section>
 </section>
 <section>
+<h2 class="section-title" id="header-functions">Functions</h2>
+<dl>
+<dt id="jerde.deserialize_value"><code class="name flex">
+<span>def <span class="ident">deserialize_value</span></span>(<span>name: str, value: Union[str, int, ForwardRef(None), Sequence[object], Mapping[str, object]], expected_type: object, module_scope: dict[str, object]) ‑> Any</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Deserialize any specific value, can be any supported hint including union!</p>
+<p><code>name</code> will be included in any error messages produced!</p>
+<p><code>module_scope</code> will be used to resolve forward referenced type hints, for example <code>dict[str, "ModelA"]</code>. this can usually just be <code>globals()</code></p>
+<pre><code class="language-python-repl">&gt;&gt;&gt; deserialize_value(&quot;...&quot;, ..., ModelA | ModelB, globals())
+</code></pre></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def deserialize_value(name: str, value: _JSON_DATA, expected_type: object, module_scope: dict[str, object]) -&gt; Any:
+    &#34;&#34;&#34;
+    Deserialize any specific value, can be any supported hint including union!
+
+    `name` will be included in any error messages produced!
+
+    `module_scope` will be used to resolve forward referenced type hints, for example `dict[str, &#34;ModelA&#34;]`. this can usually just be `globals()`
+
+    &gt;&gt;&gt; deserialize_value(&#34;...&#34;, ..., ModelA | ModelB, globals())
+    &#34;&#34;&#34;
+    if isinstance(expected_type, str):
+        expected_type = eval(expected_type, globals(), module_scope)
+
+    if typing.get_origin(expected_type) == list:
+        if not isinstance(value, list):
+            raise TypeError(f&#34;Expected {name!r} to be {expected_type}, but got: {type(value)}&#34;)
+
+        list_members: type = typing.get_args(expected_type)[0]
+        return [deserialize_value(f&#34;{name}.{index}&#34;, elem, list_members, module_scope) for index, elem in enumerate(value)]  # type: ignore
+    
+    if typing.get_origin(expected_type) == dict:
+        if not isinstance(value, dict):
+            raise TypeError(f&#34;Expected {name!r} to be {expected_type}, but got: {type(value)}&#34;)
+        
+        key_type, value_type = typing.get_args(expected_type)
+        if key_type != str:
+            raise TypeError(f&#34;Dict key type must be str, got {key_type}, in type hint for {name!r}&#34;)
+        
+        return {key: deserialize_value(f&#34;{name}.{key}&#34;, item, value_type, module_scope) for key, item in value.items()}
+
+    if typing.get_origin(expected_type) == typing.Literal:
+        possible = typing.get_args(expected_type)
+        if value not in possible:
+            raise ValueError(f&#34;expected {name!r} to be one of {possible}, got {value!r}&#34;)
+        
+        return value
+
+    if typing.get_origin(expected_type) in {typing.Union, types.UnionType}:
+        return _deserialize_union(name, value, expected_type, module_scope)
+
+    if issubclass(expected_type, JsonModel):
+        if isinstance(value, expected_type):
+            return value
+            
+        return expected_type(value)
+
+    if issubclass(expected_type, JsonConverterModel):
+        if not hasattr(expected_type, &#34;__orig_bases__&#34;):
+            raise TypeError(f&#34;Cannot perform inspection of type {expected_type}&#34;)
+        bases: tuple[type, ...] = expected_type.__orig_bases__ # type: ignore
+        json_type: None | type = None
+        for base in bases:
+            if issubclass(typing.get_origin(base) or int, JsonConverterModel):
+                json_type = typing.get_args(base)[0]
+        if json_type is None:
+            raise TypeError(&#34;Unable to determine converter base type from provided bases: {bases}&#34;)
+        
+        return expected_type(deserialize_value(name, value, json_type, module_scope))  # type: ignore
+
+    if not isinstance(value, expected_type):
+        raise TypeError(f&#34;Expected {name!r} to be &#39;{expected_type}&#39;, but got: {type(value)}&#34;)
+    
+    return value </code></pre>
+</details>
+</dd>
+</dl>
 </section>
 <section>
 <h2 class="section-title" id="header-classes">Classes</h2>
@@ -375,7 +462,7 @@ def to_json(self) -&gt; T: ...</code></pre>
 </dd>
 <dt id="jerde.JsonModel"><code class="flex name class">
 <span>class <span class="ident">JsonModel</span></span>
-<span>(</span><span>data: Union[str, int, ForwardRef(None), Sequence[ForwardRef('_JSON_DATA')], Mapping[str, ForwardRef('_JSON_DATA')]])</span>
+<span>(</span><span>data: Union[str, int, ForwardRef(None), Sequence[object], Mapping[str, object]] = None, **kwargs: object)</span>
 </code></dt>
 <dd>
 <div class="desc"><p>This class is the main thing that does stuff.</p>
@@ -387,6 +474,12 @@ This class wil automatically parse json data in its <strong>init</strong> and ra
 10
 &gt;&gt;&gt; SimpleExample({&quot;stuff&quot;: &quot;wrong&quot;})
 TypeError: ...
+</code></pre>
+<p>You can also use keyword arguments to specify values in a nicer format.</p>
+<pre><code class="language-python-repl">&gt;&gt;&gt; class SimpleExample(JsonModel):
+...     stuff: int
+&gt;&gt;&gt; SimpleExample(stuff = 10).stuff
+10
 </code></pre>
 <p>It also supports unions (both <code>typing.Union</code> and 3.10 <code>|</code> syntax).</p>
 <pre><code class="language-python-repl">&gt;&gt;&gt; class UnionExample(JsonModel):
@@ -427,6 +520,12 @@ None
     &gt;&gt;&gt; SimpleExample({&#34;stuff&#34;: &#34;wrong&#34;})
     TypeError: ...
 
+    You can also use keyword arguments to specify values in a nicer format.
+    &gt;&gt;&gt; class SimpleExample(JsonModel):
+    ...     stuff: int
+    &gt;&gt;&gt; SimpleExample(stuff = 10).stuff
+    10
+
     It also supports unions (both `typing.Union` and 3.10 `|` syntax).
     &gt;&gt;&gt; class UnionExample(JsonModel):
     ...     stuff: int | str
@@ -449,23 +548,23 @@ None
     10
     &#34;&#34;&#34;
 
-    def __init__(self, data: _JSON_DATA):
+    def __init__(self, data: Optional[_JSON_DATA] = None, **kwargs: object):
+        if data is None:
+            data = kwargs
+
         if not isinstance(data, dict):
             raise TypeError(&#34;Expected dict&#34;)
-        
+
         # error check data
         fields = _get_fields(self.__class__)
-
-        unused_keys = data.keys() - {json_key for _, json_key, _ in fields}
-        if len(unused_keys) != 0:
-            raise ValueError(f&#34;Unexpected keys: {unused_keys}&#34;)
+        module = inspect.getmodule(self.__class__)
 
         for name, json_key, expected_type in fields:
             if hasattr(self.__class__, name) and json_key not in data:
                 setattr(self, name, getattr(self.__class__, name))
                 continue
 
-            setattr(self, name, _deserialize_value(json_key, data.get(json_key), expected_type))
+            setattr(self, name, deserialize_value(json_key, data.get(json_key), expected_type, module.__dict__))
 
     
     def to_json(self) -&gt; _JSON_DATA:
@@ -486,7 +585,7 @@ None
 <h3>Methods</h3>
 <dl>
 <dt id="jerde.JsonModel.to_json"><code class="name flex">
-<span>def <span class="ident">to_json</span></span>(<span>self) ‑> Union[str, int, ForwardRef(None), Sequence[Union[str, int, ForwardRef(None), Sequence[_JSON_DATA], Mapping[str, _JSON_DATA]]], Mapping[str, Union[str, int, ForwardRef(None), Sequence[_JSON_DATA], Mapping[str, _JSON_DATA]]]]</span>
+<span>def <span class="ident">to_json</span></span>(<span>self) ‑> Union[str, int, ForwardRef(None), Sequence[object], Mapping[str, object]]</span>
 </code></dt>
 <dd>
 <div class="desc"><p>Convert from the model into the json.</p>
@@ -573,6 +672,11 @@ None
 <ul></ul>
 </div>
 <ul id="index">
+<li><h3><a href="#header-functions">Functions</a></h3>
+<ul class="">
+<li><code><a title="jerde.deserialize_value" href="#jerde.deserialize_value">deserialize_value</a></code></li>
+</ul>
+</li>
 <li><h3><a href="#header-classes">Classes</a></h3>
 <ul>
 <li>

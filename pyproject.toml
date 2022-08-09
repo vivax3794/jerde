@@ -1,6 +1,6 @@
 [project]
 name = "jerde"
-version = "0.1.2"
+version = "0.1.8"
 description = "Json parsing for humans"
 authors = [
     {name = "vivax3794", email = "vivax3794@protonmail.com"},
@@ -34,7 +34,7 @@ dev = [
 
 [tool.pdm.scripts]
 tests = "pytest"
-docs = "pydoc --html -O docs jerde"
+docs = "pdoc --html -O docs --force jerde"
 
 [build-system]
 requires = ["pdm-pep517>=1.0.0"]

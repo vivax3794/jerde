@@ -2,9 +2,9 @@ import typing
 import types
 import abc
 import inspect
-from typing import Mapping, Sequence, TypeAlias, TypeVar
+from typing import Any, Mapping, Sequence, TypeAlias, TypeVar, Optional
 
-_JSON_DATA: TypeAlias = str | int | None | Sequence["_JSON_DATA"] | Mapping[str, "_JSON_DATA"]
+_JSON_DATA: TypeAlias = str | int | None | Sequence[object] | Mapping[str, object]
 T = TypeVar("T")
 
 
@@ -48,13 +48,13 @@ def _get_fields(cls: type) -> list[tuple[str, str, type]]:
     return fields
 
 
-def _deserialize_union(name: str, value: object, expected_type: object, module_scope: dict[str, object]) -> object:
+def _deserialize_union(name: str, value: object, expected_type: object, module_scope: dict[str, object]) -> Any:
     accepted_types: tuple[type, ...] = typing.get_args(expected_type)
 
     errors: list[str] = []
     for possible in accepted_types:
         try:
-            return _deserialize_value(name, value, possible, module_scope)
+            return deserialize_value(name, value, possible, module_scope)
         except (TypeError, ValueError) as err:
             errors.append(f"'{str(possible)}': {err}")
     if errors:
@@ -63,17 +63,25 @@ def _deserialize_union(name: str, value: object, expected_type: object, module_s
 
     return value  # type: ignore
 
-def _deserialize_value(name: str, value: _JSON_DATA, expected_type: type, module_scope: dict[str, object]) -> object:
+def deserialize_value(name: str, value: _JSON_DATA, expected_type: object, module_scope: dict[str, object]) -> Any:
+    """
+    Deserialize any specific value, can be any supported hint including union!
+
+    `name` will be included in any error messages produced!
+
+    `module_scope` will be used to resolve forward referenced type hints, for example `dict[str, "ModelA"]`. this can usually just be `globals()`
+
+    >>> deserialize_value("...", ..., ModelA | ModelB, globals())
+    """
     if isinstance(expected_type, str):
         expected_type = eval(expected_type, globals(), module_scope)
-        print(expected_type)
 
     if typing.get_origin(expected_type) == list:
         if not isinstance(value, list):
             raise TypeError(f"Expected {name!r} to be {expected_type}, but got: {type(value)}")
 
         list_members: type = typing.get_args(expected_type)[0]
-        return [_deserialize_value(f"{name}.{index}", elem, list_members, module_scope) for index, elem in enumerate(value)]  # type: ignore
+        return [deserialize_value(f"{name}.{index}", elem, list_members, module_scope) for index, elem in enumerate(value)]  # type: ignore
     
     if typing.get_origin(expected_type) == dict:
         if not isinstance(value, dict):
@@ -83,12 +91,22 @@ def _deserialize_value(name: str, value: _JSON_DATA, expected_type: type, module
         if key_type != str:
             raise TypeError(f"Dict key type must be str, got {key_type}, in type hint for {name!r}")
         
-        return {key: _deserialize_value(f"{name}.{key}", item, value_type, module_scope) for key, item in value.items()}
+        return {key: deserialize_value(f"{name}.{key}", item, value_type, module_scope) for key, item in value.items()}
+
+    if typing.get_origin(expected_type) == typing.Literal:
+        possible = typing.get_args(expected_type)
+        if value not in possible:
+            raise ValueError(f"expected {name!r} to be one of {possible}, got {value!r}")
+        
+        return value
 
     if typing.get_origin(expected_type) in {typing.Union, types.UnionType}:
         return _deserialize_union(name, value, expected_type, module_scope)
 
     if issubclass(expected_type, JsonModel):
+        if isinstance(value, expected_type):
+            return value
+            
         return expected_type(value)
 
     if issubclass(expected_type, JsonConverterModel):
@@ -102,7 +120,7 @@ def _deserialize_value(name: str, value: _JSON_DATA, expected_type: type, module
         if json_type is None:
             raise TypeError("Unable to determine converter base type from provided bases: {bases}")
         
-        return expected_type(_deserialize_value(name, value, json_type, module_scope))  # type: ignore
+        return expected_type(deserialize_value(name, value, json_type, module_scope))  # type: ignore
 
     if not isinstance(value, expected_type):
         raise TypeError(f"Expected {name!r} to be '{expected_type}', but got: {type(value)}")
@@ -140,6 +158,12 @@ class JsonModel:
     >>> SimpleExample({"stuff": "wrong"})
     TypeError: ...
 
+    You can also use keyword arguments to specify values in a nicer format.
+    >>> class SimpleExample(JsonModel):
+    ...     stuff: int
+    >>> SimpleExample(stuff = 10).stuff
+    10
+
     It also supports unions (both `typing.Union` and 3.10 `|` syntax).
     >>> class UnionExample(JsonModel):
     ...     stuff: int | str
@@ -162,17 +186,15 @@ class JsonModel:
     10
     """
 
-    def __init__(self, data: _JSON_DATA):
+    def __init__(self, data: Optional[_JSON_DATA] = None, **kwargs: object):
+        if data is None:
+            data = kwargs
+
         if not isinstance(data, dict):
             raise TypeError("Expected dict")
-        
+
         # error check data
         fields = _get_fields(self.__class__)
-
-        unused_keys = data.keys() - {json_key for _, json_key, _ in fields}
-        if len(unused_keys) != 0:
-            raise ValueError(f"Unexpected keys: {unused_keys}")
-
         module = inspect.getmodule(self.__class__)
 
         for name, json_key, expected_type in fields:
@@ -180,7 +202,7 @@ class JsonModel:
                 setattr(self, name, getattr(self.__class__, name))
                 continue
 
-            setattr(self, name, _deserialize_value(json_key, data.get(json_key), expected_type, module.__dict__))
+            setattr(self, name, deserialize_value(json_key, data.get(json_key), expected_type, module.__dict__))
 
     
     def to_json(self) -> _JSON_DATA:
