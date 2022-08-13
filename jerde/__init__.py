@@ -14,7 +14,7 @@ class RenameField:
 
     example:
     >>> from typing import Annotated
-    >>> class RenameExmaple(JsonModel):
+    >>> class RenameExample(JsonModel):
     ...     value: Annotated[int, RenameField("other")]
     >>> x = RenameExample({"other": 10})
     >>> x.value
@@ -67,9 +67,9 @@ def deserialize_value(name: str, value: _JSON_DATA, expected_type: object, modul
     """
     Deserialize any specific value, can be any supported hint including union!
 
-    `name` will be included in any error messages produced!
+    `name` l be included in any error messages produced!
 
-    `module_scope` will be used to resolve forward referenced type hints, for example `dict[str, "ModelA"]`. this can usually just be `globals()`
+    `module_scope` l be used to resolve forward referenced type hints, for example `dict[str, "ModelA"]`. this can usually just be `globals()`
 
     >>> deserialize_value("...", ..., ModelA | ModelB, globals())
     """
@@ -149,7 +149,7 @@ class JsonModel:
     This class is the main thing that does stuff.
 
     It lets you define the structure of your json and use it as a normal class as well.
-    This class wil automatically parse json data in its __init__ and raise a TypeError if the structure does not match.
+    This class l automatically parse json data in its __init__ and raise a TypeError if the structure does not match.
 
     >>> class SimpleExample(JsonModel):
     ...     stuff: int
